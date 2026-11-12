@@ -11,6 +11,7 @@ from google.genai import types
 
 # ---------- Settings ----------
 MODEL = "gemini-3.5-flash"   # If Google renames models, change it here only
+FALLBACK_MODEL = "gemini-2.5-flash"   # used automatically when the main model is busy
 MAX_HISTORY = 20             # messages sent back to the model each turn
 CURRICULUM_DIR = Path(__file__).parent / "curriculum"   # put KICD PDFs here
 FILE_TTL = 60 * 60 * 40      # Gemini keeps uploaded files 48h; refresh at 40h
@@ -171,26 +172,58 @@ def to_contents(messages, files):
     return contents
 
 
+def is_busy(e):
+    t = str(e).lower()
+    return any(k in t for k in ("503", "unavailable", "overloaded", "429", "resource_exhausted"))
+
+
+def call_model(contents, config=None):
+    """Non-streaming call with retry, then fallback model, when Google is busy."""
+    last = None
+    for model in (MODEL, FALLBACK_MODEL):
+        for attempt in range(2):
+            try:
+                return client.models.generate_content(model=model, contents=contents, config=config)
+            except Exception as e:
+                if not is_busy(e):
+                    raise (last or e)
+                last = e
+                time.sleep(2 * (attempt + 1))
+    raise last
+
+
 def stream_reply(system_prompt, files):
-    stream = client.models.generate_content_stream(
-        model=MODEL,
-        contents=to_contents(st.session_state.messages, files),
-        config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.7),
-    )
-    for chunk in stream:
-        if chunk.text:
-            yield chunk.text
+    """Streaming call with retry, then fallback model, when Google is busy."""
+    last = None
+    config = types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.7)
+    for model in (MODEL, FALLBACK_MODEL):
+        for attempt in range(2):
+            started = False
+            try:
+                stream = client.models.generate_content_stream(
+                    model=model,
+                    contents=to_contents(st.session_state.messages, files),
+                    config=config,
+                )
+                for chunk in stream:
+                    if chunk.text:
+                        started = True
+                        yield chunk.text
+                return
+            except Exception as e:
+                if started or not is_busy(e):
+                    raise (last or e) if not started else e
+                last = e
+                time.sleep(2 * (attempt + 1))
+    raise last
 
 
 def transcribe(data):
-    r = client.models.generate_content(
-        model=MODEL,
-        contents=[
-            types.Part.from_bytes(data=data, mime_type="audio/wav"),
-            "Transcribe this audio exactly. The speaker may use English, Kiswahili or both. "
-            "Return only the transcript, nothing else.",
-        ],
-    )
+    r = call_model([
+        types.Part.from_bytes(data=data, mime_type="audio/wav"),
+        "Transcribe this audio exactly. The speaker may use English, Kiswahili or both. "
+        "Return only the transcript, nothing else.",
+    ])
     return (r.text or "").strip()
 
 
@@ -203,10 +236,9 @@ def make_quiz(topic, n, system_prompt, files):
         '"answer": index 0-3 of the correct option, "explanation": 1-2 sentences}. '
         "Vary the position of the correct answer. Test understanding and application, not just recall."
     )
-    resp = client.models.generate_content(
-        model=MODEL,
-        contents=file_parts(files) + [prompt],
-        config=types.GenerateContentConfig(
+    resp = call_model(
+        file_parts(files) + [prompt],
+        types.GenerateContentConfig(
             system_instruction=system_prompt,
             response_mime_type="application/json",
             temperature=0.5,
@@ -441,41 +473,4 @@ else:
         if not topic.strip():
             st.warning("Type a topic first.")
         else:
-            sys_prompt = build_system_prompt(level, area, "Quiz / practice questions", language, audience, bool(selected_files))
-            try:
-                with st.spinner("Writing your quiz..."):
-                    items = make_quiz(topic.strip(), n, sys_prompt, selected_files)
-                if items:
-                    st.session_state.quiz = {"id": int(time.time() * 1000), "items": items, "answers": None}
-                else:
-                    st.error("The quiz came back empty. Please try again.")
-            except Exception as e:
-                st.error(f"Could not create the quiz: {e}")
-
-    quiz = st.session_state.get("quiz")
-    if quiz:
-        with st.form(f"quizform{quiz['id']}"):
-            picks = [
-                st.radio(f"{i + 1}. {q['question']}", q["options"], index=None, key=f"q{quiz['id']}_{i}")
-                for i, q in enumerate(quiz["items"])
-            ]
-            if st.form_submit_button("Submit answers"):
-                quiz["answers"] = picks
-
-        if quiz["answers"] is not None:
-            items, given = quiz["items"], quiz["answers"]
-            score = sum(1 for q, a in zip(items, given) if a == q["options"][q["answer"]])
-            pct = round(100 * score / len(items))
-            st.subheader(f"Score: {score}/{len(items)} ({pct}%)")
-            st.write(f"**CBC level (approximate):** {cbc_level(pct)}")
-            for i, (q, a) in enumerate(zip(items, given)):
-                right = q["options"][q["answer"]]
-                if a == right:
-                    st.success(f"{i + 1}. Correct: {right}")
-                else:
-                    st.error(f"{i + 1}. {q['question']}  \nYour answer: {a or 'No answer'}  \nCorrect answer: {right}")
-                st.caption(q.get("explanation", ""))
-
-st.divider()
-st.caption("AI-generated content. Teachers should check against official KICD curriculum designs before use.")
-
+            sys_prompt = build_system_prompt(level, area, "Quiz / practice questions", language, audience, boo
