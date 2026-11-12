@@ -467,4 +467,15 @@ else:
             score = sum(1 for q, a in zip(items, given) if a == q["options"][q["answer"]])
             pct = round(100 * score / len(items))
             st.subheader(f"Score: {score}/{len(items)} ({pct}%)")
-            st.write(f"**CBC lev
+            st.write(f"**CBC level (approximate):** {cbc_level(pct)}")
+            for i, (q, a) in enumerate(zip(items, given)):
+                right = q["options"][q["answer"]]
+                if a == right:
+                    st.success(f"{i + 1}. Correct: {right}")
+                else:
+                    st.error(f"{i + 1}. {q['question']}  \nYour answer: {a or 'No answer'}  \nCorrect answer: {right}")
+                st.caption(q.get("explanation", ""))
+
+st.divider()
+st.caption("AI-generated content. Teachers should check against official KICD curriculum designs before use.")
+
