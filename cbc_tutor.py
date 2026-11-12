@@ -473,4 +473,40 @@ else:
         if not topic.strip():
             st.warning("Type a topic first.")
         else:
-            sys_prompt = build_system_prompt(level, area, "Quiz / practice questions", language, audience, boo
+            sys_prompt = build_system_prompt(level, area, "Quiz / practice questions", language, audience, bool(selected_files))
+            try:
+                with st.spinner("Writing your quiz..."):
+                    items = make_quiz(topic.strip(), n, sys_prompt, selected_files)
+                if items:
+                    st.session_state.quiz = {"id": int(time.time() * 1000), "items": items, "answers": None}
+                else:
+                    st.error("The quiz came back empty. Please try again.")
+            except Exception as e:
+                st.error(f"Could not create the quiz: {e}")
+
+    quiz = st.session_state.get("quiz")
+    if quiz:
+        with st.form(f"quizform{quiz['id']}"):
+            picks = [
+                st.radio(f"{i + 1}. {q['question']}", q["options"], index=None, key=f"q{quiz['id']}_{i}")
+                for i, q in enumerate(quiz["items"])
+            ]
+            if st.form_submit_button("Submit answers"):
+                quiz["answers"] = picks
+
+        if quiz["answers"] is not None:
+            items, given = quiz["items"], quiz["answers"]
+            score = sum(1 for q, a in zip(items, given) if a == q["options"][q["answer"]])
+            pct = round(100 * score / len(items))
+            st.subheader(f"Score: {score}/{len(items)} ({pct}%)")
+            st.write(f"**CBC level (approximate):** {cbc_level(pct)}")
+            for i, (q, a) in enumerate(zip(items, given)):
+                right = q["options"][q["answer"]]
+                if a == right:
+                    st.success(f"{i + 1}. Correct: {right}")
+                else:
+                    st.error(f"{i + 1}. {q['question']}  \nYour answer: {a or 'No answer'}  \nCorrect answer: {right}")
+                st.caption(q.get("explanation", ""))
+
+st.divider()
+st.caption("AI-generated content. Teachers should check against official KICD curriculum designs before use.")
